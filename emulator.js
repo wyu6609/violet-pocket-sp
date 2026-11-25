@@ -60,9 +60,16 @@ function cartridgeStore(mode,action){
 async function reopenCartridge(){
   $('#open').disabled=true;
   try{
-    const file=await cartridgeStore('readonly',store=>store.get('current'));
-    if(file)await boot(file,false);
-  }catch{status('Choose a ROM. Cartridge storage is unavailable.');}
+    const file=await cartridgeStore('readonly',store=>store.get('current')).catch(()=>null);
+    if(file){
+      await boot(file,false);
+    }else{
+      status('Loading Pokémon FireRed…');
+      const response=await fetch('./firered.zip');
+      if(!response.ok)throw Error('Default cartridge unavailable.');
+      await boot(new File([await response.blob()],'firered.zip'),false);
+    }
+  }catch{status('Default cartridge unavailable. Choose Load ROM to play.');}
   finally{$('#open').disabled=false;}
 }
 async function boot(file,remember){
