@@ -204,6 +204,7 @@ async function boot(file,{source,reason,id,remember=false}){
       logPlayer('error','Save recovery failed',{rom:activeRom(), error:errorText(error)});
       status('Could not recover progress: '+error.message);
     }
+    void History.render();
     pause(document.hidden,'boot');
     $('fieldset').disabled=false;
     logPlayer('info','ROM ready',{rom:activeRom(), source, paused, bytes:buffer.byteLength,
@@ -308,9 +309,11 @@ async function resumeLatestState(){
     try{await Saves.migrate(key,size);}
     catch(error){logPlayer('warn','Legacy save retained',{error:errorText(error)});}
   }
+  const history=await History.list(cartridge);
+  const older=await Promise.all(history.map(async e=>({slot:e.slot,name:'Earlier checkpoint',state:await Saves.get(cartridge+':'+e.slot)})));
   const slots=[
     {slot:'auto',name:'Automatic checkpoint',state:await Saves.get(cartridge+':auto')},
-    {slot:'manual',name:'Manual save',state:await Saves.get(cartridge)}
+    {slot:'manual',name:'Manual save',state:await Saves.get(cartridge)},...older
   ].filter(slot=>slot.state).sort((a,b)=>b.state.time-a.state.time);
   if(!slots.length)logPlayer('info','No checkpoint found',{rom:activeRom()});
   let failure;
@@ -342,7 +345,9 @@ async function checkpoint(reason='periodic',force=false){
   try{
     const record=captureRecord();
     progressChanged=false;
-    await Saves.put(key+':auto',record);
+    record.thumbnail=History.thumbnail();
+    const rotated=await History.write(key,record);
+    if(rotated&&cartridge===key)void History.render();
     if(cartridge!==key)return true;
     const recovered=lastAutosaveError!==undefined;
     lastAutosaveError=undefined;

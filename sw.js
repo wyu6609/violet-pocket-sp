@@ -1,7 +1,7 @@
 'use strict';
 const prefix='violet-sp-shell:'+self.registration.scope+':';
-const name=prefix+'v2';
-const files=['index.html','styles.css','app.js','emulator.js','offline.js','saves.js','transfer.js',
+const name=prefix+'v3';
+const files=['index.html','styles.css','app.js','emulator.js','offline.js','saves.js','history.js','transfer.js',
   'vendor/react.js','vendor/react-dom.js','vendor/fflate.js','vendor/mgba.js','vendor/mgba.wasm'];
 const url=path=>new URL(path,self.registration.scope).href;
 const shell=new Set(files.map(url));

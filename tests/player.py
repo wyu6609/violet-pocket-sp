@@ -89,6 +89,45 @@ def check_transfers(page):
         assert imported==len(raw)
     print('PASS checkpoint file rewound real CPU registers, corrupt import preserved progress, and raw .sav round-tripped byte for byte.',flush=True)
 
+def check_history(page,url):
+    page.evaluate("""async()=>{
+      pause(true,'fixture');
+      const real=Date.now;
+      window.testOffset=-3600000;
+      Date.now=()=>real()+window.testOffset;
+      await Saves.transaction('readwrite',s=>{
+        for(const suffix of [':auto',':history',':past-1',':past-2',':past-3'])s.delete(cartridge+suffix);
+      });
+    }""")
+    for _ in range(7):
+        page.evaluate("""async()=>{
+          window.testOffset+=300100;
+          for(let i=0;i<4;i++)core._mgbawasm_run_frame();
+          paint();
+          if(!await checkpoint('history test',true))throw Error('write failed');
+        }""")
+    entries=page.evaluate("History.list(cartridge)")
+    assert len(entries)==3 and all(entries[i]['time']-entries[i+1]['time']>=300000 for i in range(2))
+    page.click('#history-panel summary')
+    expect(page.locator('#history-list img')).to_have_count(3)
+    assert page.locator('#history-list img').first.evaluate('img=>img.complete && img.naturalWidth===120')
+    original=page.evaluate("async()=>Array.from((await Saves.get(cartridge+':'+(await History.list(cartridge))[2].slot)).bytes.slice(32,96))")
+    page.once('dialog',lambda d:d.accept())
+    page.locator('#history-list button').last.click()
+    expect(page.locator('#status')).to_have_text('Earlier checkpoint restored.')
+    assert page.evaluate('Array.from(captureState().slice(32,96))')==original
+    page.evaluate("""async()=>{
+      const bad=Saves.record(captureState(),Date.now()+1000000);
+      bad.crc^=1;
+      await Saves.put(cartridge,bad);
+      await Saves.put(cartridge+':auto',bad);
+      progressChanged=false;
+    }""")
+    boot(page,url)
+    expect(page.locator('#status')).to_contain_text('Earlier checkpoint restored.')
+    expect(page.locator('#status')).to_contain_text('unreadable')
+    print('PASS bounded five-minute history, three real thumbnails, exact CPU rewind, and recovery from two damaged slots.',flush=True)
+
 def check_offline(page,url,engine,host):
     expect(page.locator('#offline-status')).to_have_text('Ready offline',timeout=90000)
     page.click('#save')
@@ -124,6 +163,7 @@ def main():
             boot(page,url)
             check_saves(page,url)
             check_transfers(page)
+            check_history(page,url)
             check_offline(page,url,engine,host)
         finally:
             print('Player status:',page.locator('#status').all_text_contents(),flush=True)
