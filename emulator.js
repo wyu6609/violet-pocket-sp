@@ -130,7 +130,7 @@ async function boot(file,remember,id){
     if(!/\.gba$/i.test(file.name)||file.size<192||file.size>32*1024*1024)throw Error('Choose an unpacked .gba file up to 32 MiB.');
     const buffer=await file.arrayBuffer();
     const digest=await crypto.subtle.digest('SHA-256',buffer);
-    if (cartridge && !checkpoint()) throw Error('Could not save current progress. Free browser storage before switching games.');
+    if (cartridge && !checkpoint(true)) throw Error('Could not save current progress. Free browser storage before switching games.');
     pause(true);cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
     const loaded=memory(buffer.byteLength,ptr=>{
       core.HEAPU8.set(new Uint8Array(buffer),ptr);
@@ -145,19 +145,7 @@ async function boot(file,remember,id){
     pause(document.hidden);
     status(document.hidden?'Paused':'Playing');
     try {
-      const automatic=localStorage.getItem(cartridge+':auto');
-      if (automatic) {
-        try { restoreState(automatic); status('Automatic checkpoint restored.'); }
-        catch (error) {
-          const manual=localStorage.getItem(cartridge);
-          if (!manual) throw error;
-          restoreState(manual);
-          status('Automatic checkpoint unreadable. Manual save restored.');
-        }
-      } else {
-        const manual=localStorage.getItem(cartridge);
-        if (manual) { restoreState(manual); status('Manual save restored.'); }
-      }
+      resumeLatestState();
     } catch (error) { status('Could not recover progress: '+error.message); }
     selectedGame=id || cartridge;
     if(!Array.from(library.options).some(o=>o.value===selectedGame))library.add(new Option(file.name,selectedGame));
@@ -212,8 +200,31 @@ function saveState(key){
     if(!core._mgbawasm_state_save(ptr))throw Error('Core could not save.');
     const bytes=core.HEAPU8.subarray(ptr,ptr+size),parts=[];
     for(let i=0;i<size;i+=8192)parts.push(String.fromCharCode(...bytes.subarray(i,i+8192)));
-    localStorage.setItem(key,btoa(parts.join('')));
+    localStorage.setItem(key,Date.now()+'|'+btoa(parts.join('')));
   });
+}
+// Legacy saves contain only base64, so their original save time is unknown.
+function readState(key){
+  const value=localStorage.getItem(key);
+  if(!value)return null;
+  const separator=value.indexOf('|');
+  return separator<0 ? {time:0,data:value} :
+    {time:Number(value.slice(0,separator)) || 0,data:value.slice(separator+1)};
+}
+function resumeLatestState(){
+  const slots=[
+    {name:'Automatic checkpoint',state:readState(cartridge+':auto')},
+    {name:'Manual save',state:readState(cartridge)}
+  ].filter(slot=>slot.state).sort((a,b)=>b.state.time-a.state.time);
+  let failure;
+  for(const slot of slots){
+    try{
+      restoreState(slot.state.data);
+      status(slot.name+' restored.'+(failure?' Newer save was unreadable.':''));
+      return;
+    }catch(error){failure=error;}
+  }
+  if(failure)throw failure;
 }
 function restoreState(saved){
   if(!saved)throw Error('No state saved for this ROM.');
@@ -225,8 +236,8 @@ function restoreState(saved){
   });
   flushSound();clearInput();last=0;debt=0;paint();
 }
-function checkpoint(){
-  if(!cartridge||!progressChanged)return true;
+function checkpoint(force=false){
+  if(!cartridge||(!force&&!progressChanged))return true;
   try{
     saveState(cartridge+':auto');
     progressChanged=false;
@@ -241,7 +252,7 @@ $('#save').onclick=()=>{
 };
 $('#load').onclick=()=>{
   try{
-    restoreState(localStorage.getItem(cartridge));
+    restoreState(readState(cartridge)?.data);
     progressChanged=true;
     if(checkpoint())status('Manual state restored.');
   }catch(error){status(error.message);}
