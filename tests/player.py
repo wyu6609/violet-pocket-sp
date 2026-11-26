@@ -47,6 +47,21 @@ def check_saves(page, url):
     second.close()
     print('PASS binary IndexedDB, exact legacy bytes and timestamp, invalid legacy retained, background save.',flush=True)
 
+def check_offline(page,url,engine,host):
+    expect(page.locator('#offline-status')).to_have_text('Ready offline',timeout=90000)
+    page.click('#save')
+    expect(page.locator('#status')).to_have_text('Manual state saved.')
+    page.goto('about:blank')
+    if engine=='webkit':
+        host.shutdown()
+        host.server_close()
+    else:
+        page.context.set_offline(True)
+    boot(page,url+'?offline-relaunch')
+    expect(page.locator('#offline-status')).to_have_text('Ready offline')
+    expect(page.locator('#status')).to_contain_text('restored')
+    print('PASS fresh offline navigation, local core, cartridge and recovered checkpoint.',flush=True)
+
 def main():
     engine=sys.argv[1] if len(sys.argv)>1 else 'chromium'
     handler=functools.partial(SimpleHTTPRequestHandler,directory=ROOT)
@@ -66,6 +81,7 @@ def main():
         try:
             boot(page,url)
             check_saves(page,url)
+            check_offline(page,url,engine,host)
         finally:
             print('Player status:',page.locator('#status').all_text_contents(),flush=True)
             browser.close()

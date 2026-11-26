@@ -1,6 +1,6 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
-const cdn = 'https://cdn.jsdelivr.net/npm/@wasm-gaming/mgba-wasm@0.3.1/dist/mgba/';
+const runtime = new URL('./vendor/',document.baseURI).href;
 const screenContext = $('canvas').getContext('2d', {alpha:false});
 const pixels = screenContext.createImageData(240,160);
 const names = ['A','B','Select','Start','Right','Left','Up','Down','R','L'];
@@ -49,11 +49,11 @@ $('#start').onclick=async()=>{
     logPlayer('info','Loading emulator core',{core:'mGBA', version:'0.3.1'});
     status('Loading mGBA…');
     if(typeof createMgbaModule==='undefined')await new Promise((resolve,reject)=>{
-      const script=document.createElement('script');script.src=cdn+'mgba.js';script.onload=resolve;
+      const script=document.createElement('script');script.src=runtime+'mgba.js';script.onload=resolve;
       script.onerror=()=>reject(Error('Core download failed. Check your connection and retry.'));document.head.append(script);
     });
     stage='core initialization';
-    core=await createMgbaModule({locateFile:name=>cdn+name});
+    core=await createMgbaModule({locateFile:name=>runtime+name});
     core._mgbawasm_init();audioPtr=core._malloc(16384*4);
     if(!audioPtr)throw Error('Could not allocate audio memory.');
     logPlayer('info','Core ready',{startupMs:Math.round(performance.now()-startedAt), audio:audio.state});
@@ -116,7 +116,7 @@ async function openGame(id,reason='selection'){
     if(game){
       status('Loading '+game.title+'…');
       const startedAt=performance.now();
-      const response=await fetch('./'+encodeURIComponent(game.path));
+      const response=await Offline.bundled(game.path);
       if(!response.ok)throw Error(game.title+' could not be downloaded (HTTP '+response.status+').');
       file=new File([await response.blob()],game.path);
       const timings=performance.getEntriesByName?.(response.url,'resource') || [];
@@ -184,7 +184,7 @@ async function boot(file,{source,reason,id,remember=false}){
     stage='save before ROM switch';
     if (cartridge && !await checkpoint('switch',true)) throw Error('Could not save current progress. Free browser storage before switching games.');
     stage='load ROM into core';
-    pause(true,'switch');cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
+    pause(true,'switch');Offline.set('Checking offline availability…');cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
     const loaded=memory(buffer.byteLength,ptr=>{
       core.HEAPU8.set(new Uint8Array(buffer),ptr);
       return core._mgbawasm_load(ptr,buffer.byteLength,0,0,0,0,1);
@@ -211,9 +211,13 @@ async function boot(file,{source,reason,id,remember=false}){
     selectedGame=id || cartridge;
     if(!Array.from(library.options).some(o=>o.value===selectedGame))library.add(new Option(file.name,selectedGame));
     library.value=selectedGame;
-    try{await rememberGame(selectedGame,remember?file:null);}
+    try{
+      await rememberGame(selectedGame,remember?file:null);
+      void Offline.check(selectedGame,bundledGames.get(selectedGame)?.path);
+    }
     catch(error){
       logPlayer('warn','Cartridge library write failed',{rom:activeRom(), error:errorText(error)});
+      Offline.set('Offline unavailable for this cartridge');
       status('Playing. Browser storage could not remember this game.');
     }
   }catch(e){
