@@ -9,34 +9,60 @@ const pressed = new Map(), sources = new Set();
 let core, audio, gain, audioPtr, cartridge, paused=true, speed=1, nextSound=0, last=0, debt=0;
 const checkpointInterval = 10000;
 let checkpointDue = 0, progressChanged = false;
+let lastAutosaveError, awaitingFirstFrame=false;
+function logPlayer(level, event, details = {}) {
+  console[level]('[Violet Pocket SP] ' + event, details);
+}
+function errorText(error) {
+  return [error?.name, error?.message || (typeof error === 'string' ? error : '')]
+    .filter(Boolean).join(': ').slice(0,300) || 'Unknown error';
+}
+// Use a short ROM fingerprint to correlate events without logging local filenames or game data.
+function activeRom() { return cartridge?.split(':').pop().slice(0,12); }
 const status = message => { $('#status').textContent=message; };
 function syncKeys(){
   const held = new Set(pressed.values());
   core?._mgbawasm_set_keys(names.reduce((mask,name,i)=>mask|(held.has(name)?1<<i:0),0));
   document.querySelectorAll('[data-key]').forEach(b=>b.classList.toggle('held',held.has(b.dataset.key)));
 }
-function clearInput(){pressed.clear();syncKeys();}
+function clearInput(reason){
+  if(pressed.size)logPlayer('debug','Held controls released',{reason, count:pressed.size});
+  pressed.clear();syncKeys();
+}
 function flushSound(){for(const s of sources)s.stop();sources.clear();nextSound=0;}
-function pause(value){
-  paused=value;last=0;debt=0;clearInput();flushSound();
+function pause(value,reason){
+  const changed = paused !== value;
+  paused=value;last=0;debt=0;clearInput(reason);flushSound();
+  if(changed)logPlayer('info',value ? 'Emulator paused' : 'Emulator resumed',{reason, rom:activeRom()});
   $('#pause').textContent=value?'Resume':'Pause';
 }
 $('#start').onclick=async()=>{
   const button=$('#start');button.disabled=true;
+  const startedAt=performance.now();
+  let stage='audio startup';
+  logPlayer('info','Power on requested');
   try{
     audio??=new AudioContext({sampleRate:44100,latencyHint:'interactive'});
     await audio.resume();
     if(!gain){gain=audio.createGain();gain.gain.value=.65;gain.connect(audio.destination);}
+    stage='core loader';
+    logPlayer('info','Loading emulator core',{core:'mGBA', version:'0.3.1'});
     status('Loading mGBA…');
     if(typeof createMgbaModule==='undefined')await new Promise((resolve,reject)=>{
       const script=document.createElement('script');script.src=cdn+'mgba.js';script.onload=resolve;
       script.onerror=()=>reject(Error('Core download failed. Check your connection and retry.'));document.head.append(script);
     });
+    stage='core initialization';
     core=await createMgbaModule({locateFile:name=>cdn+name});
     core._mgbawasm_init();audioPtr=core._malloc(16384*4);
     if(!audioPtr)throw Error('Could not allocate audio memory.');
+    logPlayer('info','Core ready',{startupMs:Math.round(performance.now()-startedAt), audio:audio.state});
+    stage='reopen cartridge';
     $('#gate').hidden=true;$('#open').disabled=false;status('Choose a local .gba cartridge.');requestAnimationFrame(tick); await reopenCartridge();
-  }catch(e){button.disabled=false;status(e.message);}
+  }catch(e){
+    logPlayer('error','Power on failed',{stage, error:errorText(e)});
+    button.disabled=false;status(e.message);
+  }
 };
 function memory(size,action){
   const ptr=core._malloc(size);if(!ptr)throw Error('Insufficient emulator memory.');
@@ -44,18 +70,22 @@ function memory(size,action){
 }
 $('#open').onclick=()=>$('#file').click();
 $('#file').onchange=async event=>{
-  const file=event.target.files[0];event.target.value='';if(file)await boot(file,true);
+  const file=event.target.files[0];event.target.value='';if(file)await boot(file,{source:'local file',reason:'import',remember:true});
 };
 function cartridgeStore(mode,action){
   return new Promise((resolve,reject)=>{
     const request=indexedDB.open('violet-cartridges',1);
     request.onupgradeneeded=()=>request.result.createObjectStore('library');
     request.onerror=()=>reject(request.error);
+    request.onblocked=()=>logPlayer('warn','Cartridge library blocked',{operation:mode});
     request.onsuccess=()=>{
-      const db=request.result,tx=db.transaction('library',mode);
-      const operation=action(tx.objectStore('library'));
-      tx.oncomplete=()=>{db.close();resolve(operation.result);};
-      tx.onabort=()=>{db.close();reject(tx.error);};
+      const db=request.result;
+      try{
+        const tx=db.transaction('library',mode);
+        const operation=action(tx.objectStore('library'));
+        tx.oncomplete=()=>{db.close();resolve(operation.result);};
+        tx.onabort=()=>{db.close();reject(tx.error || Error('Cartridge storage transaction interrupted.'));};
+      }catch(error){db.close();reject(error);}
     };
   });
 }
@@ -76,22 +106,35 @@ library.onchange=()=>{
   if(core && $('#gate').hidden && !$('#open').disabled)openGame(library.value);
 };
 function busyLoading(busy){library.disabled=busy;$('#open').disabled=busy;}
-async function openGame(id){
+async function openGame(id,reason='selection'){
   busyLoading(true);
+  const game=bundledGames.get(id);
+  const source=game ? 'bundled URL' : 'IndexedDB';
+  logPlayer('info','Opening cartridge',{source, game:game?.title, reason});
   try{
-    const game=bundledGames.get(id);
     let file;
     if(game){
       status('Loading '+game.title+'…');
+      const startedAt=performance.now();
       const response=await fetch('./'+encodeURIComponent(game.path));
-      if(!response.ok)throw Error(game.title+' could not be downloaded.');
+      if(!response.ok)throw Error(game.title+' could not be downloaded (HTTP '+response.status+').');
       file=new File([await response.blob()],game.path);
+      const timings=performance.getEntriesByName?.(response.url,'resource') || [];
+      const timing=timings.filter(entry=>entry.initiatorType==='fetch' && entry.startTime>=startedAt).pop();
+      let delivery='unknown';
+      if(timing?.transferSize>0)delivery='network or revalidated';
+      else if(timing?.transferSize===0 && timing.encodedBodySize>0)delivery='browser cache';
+      logPlayer('info','Bundled ROM ready',{game:game.title, delivery, bytes:file.size,
+        fetchMs:Math.round(performance.now()-startedAt)});
     }else{
       file=await cartridgeStore('readonly',store=>store.get(id));
       if(!file)throw Error('This cartridge is unavailable. Import it again.');
     }
-    await boot(file,false,id);
-  }catch(error){status(error.message);}
+    await boot(file,{source, id, reason});
+  }catch(error){
+    logPlayer('error','Cartridge unavailable',{source, game:game?.title, reason, error:errorText(error)});
+    status(error.message);
+  }
   finally{library.value=selectedGame;busyLoading(false);}
 }
 async function reopenCartridge(){
@@ -101,13 +144,16 @@ async function reopenCartridge(){
     const names=await cartridgeStore('readonly',store=>store.get('titles')) || {};
     for(const [key,name] of Object.entries(names))library.add(new Option(name,key));
     previous=await cartridgeStore('readonly',store=>store.get('current'));
-  }catch { /* Bundled games also work when storage is unavailable. */ }
+    logPlayer('info','Cartridge library ready',{importedCount:Object.keys(names).length});
+  }catch(error){
+    logPlayer('warn','Cartridge library unavailable',{error:errorText(error), fallback:'bundled games'});
+  }
   if(!userSelected && previous instanceof Blob){
-    await boot(previous,true);
+    await boot(previous,{source:'IndexedDB',reason:'reopen legacy cartridge',remember:true});
     return;
   }
   const id=userSelected?library.value:previous;
-  await openGame(Array.from(library.options).some(o=>o.value===id)?id:'firered');
+  await openGame(Array.from(library.options).some(o=>o.value===id)?id:'firered','power on');
 }
 async function rememberGame(id,file){
   if(!file)return cartridgeStore('readwrite',store=>store.put(id,'current'));
@@ -123,15 +169,22 @@ async function rememberGame(id,file){
     return request;
   });
 }
-async function boot(file,remember,id){
+async function boot(file,{source,reason,id,remember=false}){
   busyLoading(true);
+  const startedAt=performance.now();
+  let stage='read cartridge';
+  const format=/\.zip$/i.test(file.name) ? 'ZIP' : /\.gba$/i.test(file.name) ? 'GBA' : 'unknown';
+  logPlayer('info','ROM boot requested',{source,reason,format,bytes:file.size});
   try{
     file=await readCartridge(file);
     if(!/\.gba$/i.test(file.name)||file.size<192||file.size>32*1024*1024)throw Error('Choose an unpacked .gba file up to 32 MiB.');
+    stage='identify cartridge';
     const buffer=await file.arrayBuffer();
     const digest=await crypto.subtle.digest('SHA-256',buffer);
-    if (cartridge && !checkpoint(true)) throw Error('Could not save current progress. Free browser storage before switching games.');
-    pause(true);cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
+    stage='save before ROM switch';
+    if (cartridge && !checkpoint('switch',true)) throw Error('Could not save current progress. Free browser storage before switching games.');
+    stage='load ROM into core';
+    pause(true,'switch');cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
     const loaded=memory(buffer.byteLength,ptr=>{
       core.HEAPU8.set(new Uint8Array(buffer),ptr);
       return core._mgbawasm_load(ptr,buffer.byteLength,0,0,0,0,1);
@@ -140,19 +193,32 @@ async function boot(file,remember,id){
     cartridge='violet-mgba-031:'+Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
     $('#cart').textContent=file.name;
     progressChanged=false;
+    lastAutosaveError=undefined;
+    awaitingFirstFrame=true;
     checkpointDue=performance.now()+checkpointInterval;
     $('fieldset').disabled=false;
-    pause(document.hidden);
+    pause(document.hidden,'boot');
     status(document.hidden?'Paused':'Playing');
     try {
       resumeLatestState();
-    } catch (error) { status('Could not recover progress: '+error.message); }
+    } catch (error) {
+      logPlayer('error','Save recovery failed',{rom:activeRom(), error:errorText(error)});
+      status('Could not recover progress: '+error.message);
+    }
+    logPlayer('info','ROM ready',{rom:activeRom(), source, paused, bytes:buffer.byteLength,
+      bootMs:Math.round(performance.now()-startedAt)});
     selectedGame=id || cartridge;
     if(!Array.from(library.options).some(o=>o.value===selectedGame))library.add(new Option(file.name,selectedGame));
     library.value=selectedGame;
     try{await rememberGame(selectedGame,remember?file:null);}
-    catch{status('Playing. Browser storage could not remember this game.');}
-  }catch(e){status(e.message);}finally{busyLoading(false);}
+    catch(error){
+      logPlayer('warn','Cartridge library write failed',{rom:activeRom(), error:errorText(error)});
+      status('Playing. Browser storage could not remember this game.');
+    }
+  }catch(e){
+    logPlayer('error','ROM boot failed',{source, reason, stage, error:errorText(e)});
+    status(e.message);
+  }finally{busyLoading(false);}
 };
 function queueAudio(){
   const n=core._mgbawasm_read_audio(audioPtr,16384);
@@ -180,18 +246,27 @@ function tick(time){
       while(debt>=step){core._mgbawasm_run_frame();queueAudio();debt-=step;advanced=true;}
       if(advanced){
         paint();
+        if(awaitingFirstFrame){
+          awaitingFirstFrame=false;
+          logPlayer('info','First frame rendered',{rom:activeRom()});
+        }
         progressChanged=true;
         if(time>=checkpointDue){
           checkpointDue=time+checkpointInterval;
           checkpoint();
         }
       }
-    }catch(e){pause(true);status(e.message);}
+    }catch(e){
+      logPlayer('error','Emulation interrupted',{rom:activeRom(), error:errorText(e)});
+      pause(true,'runtime error');status(e.message);
+    }
   }
   requestAnimationFrame(tick);
 }
-$('#pause').onclick=async()=>{try{if(paused)await audio.resume();pause(!paused);status(paused?'Paused':'Playing');}catch(e){status(e.message);}};
-$('#fast').onclick=()=>{speed=speed===1?2:1;flushSound();$('#fast').setAttribute('aria-pressed',String(speed===2));};
+$('#pause').onclick=async()=>{try{if(paused)await audio.resume();pause(!paused,'user');status(paused?'Paused':'Playing');}catch(e){
+  logPlayer('error','Playback change failed',{rom:activeRom(), error:errorText(e)});status(e.message);
+}};
+$('#fast').onclick=()=>{speed=speed===1?2:1;logPlayer('info','Playback speed changed',{speed});flushSound();$('#fast').setAttribute('aria-pressed',String(speed===2));};
 $('#vol').oninput=e=>gain.gain.setTargetAtTime(e.target.value/100,audio.currentTime,.012);
 function saveState(key){
   const size=core._mgbawasm_state_size();
@@ -202,6 +277,7 @@ function saveState(key){
     for(let i=0;i<size;i+=8192)parts.push(String.fromCharCode(...bytes.subarray(i,i+8192)));
     localStorage.setItem(key,Date.now()+'|'+btoa(parts.join('')));
   });
+  return size;
 }
 // Legacy saves contain only base64, so their original save time is unknown.
 function readState(key){
@@ -213,16 +289,22 @@ function readState(key){
 }
 function resumeLatestState(){
   const slots=[
-    {name:'Automatic checkpoint',state:readState(cartridge+':auto')},
-    {name:'Manual save',state:readState(cartridge)}
+    {slot:'auto',name:'Automatic checkpoint',state:readState(cartridge+':auto')},
+    {slot:'manual',name:'Manual save',state:readState(cartridge)}
   ].filter(slot=>slot.state).sort((a,b)=>b.state.time-a.state.time);
+  if(!slots.length)logPlayer('info','No checkpoint found',{rom:activeRom()});
   let failure;
   for(const slot of slots){
     try{
       restoreState(slot.state.data);
+      logPlayer('info','Checkpoint restored',{rom:activeRom(), slot:slot.slot, reason:'boot',
+        savedAt:slot.state.time || null, usedFallback:Boolean(failure)});
       status(slot.name+' restored.'+(failure?' Newer save was unreadable.':''));
       return;
-    }catch(error){failure=error;}
+    }catch(error){
+      logPlayer('warn','Unreadable checkpoint',{rom:activeRom(), slot:slot.slot, error:errorText(error)});
+      failure=error;
+    }
   }
   if(failure)throw failure;
 }
@@ -234,28 +316,52 @@ function restoreState(saved){
     core.HEAPU8.set(Uint8Array.from(raw,c=>c.charCodeAt(0)),ptr);
     if(!core._mgbawasm_state_load(ptr))throw Error('Core rejected this state.');
   });
-  flushSound();clearInput();last=0;debt=0;paint();
+  flushSound();clearInput('restore');last=0;debt=0;paint();
 }
-function checkpoint(force=false){
-  if(!cartridge||(!force&&!progressChanged))return true;
+function checkpoint(reason='periodic',force=false){
+  if(!cartridge||(!force&&!progressChanged)){
+    if(cartridge && reason!=='periodic')logPlayer('debug','Checkpoint skipped',{rom:activeRom(), reason, unchanged:true});
+    return true;
+  }
   try{
-    saveState(cartridge+':auto');
+    const bytes=saveState(cartridge+':auto');
+    const recovered=lastAutosaveError!==undefined;
+    lastAutosaveError=undefined;
+    logPlayer(reason==='periodic' && !recovered ? 'debug' : 'info','Checkpoint saved',{
+      rom:activeRom(), slot:'auto', reason, bytes, recovered
+    });
     progressChanged=false;
     return true;
   }catch(error){
+    const message=errorText(error);
+    if(reason!=='periodic' || lastAutosaveError!==message)
+      logPlayer('error','Checkpoint failed',{rom:activeRom(), slot:'auto', reason, error:message});
+    lastAutosaveError=message;
     status('Automatic save failed: '+error.message);
     return false;
   }
 }
 $('#save').onclick=()=>{
-  try{saveState(cartridge);status('Manual state saved.');}catch(error){status(error.message);}
+  try{
+    const bytes=saveState(cartridge);
+    logPlayer('info','Checkpoint saved',{rom:activeRom(), slot:'manual', reason:'user', bytes});
+    status('Manual state saved.');
+  }catch(error){
+    logPlayer('error','Checkpoint failed',{rom:activeRom(), slot:'manual', reason:'user', error:errorText(error)});
+    status(error.message);
+  }
 };
 $('#load').onclick=()=>{
   try{
-    restoreState(readState(cartridge)?.data);
+    const record=readState(cartridge);
+    restoreState(record?.data);
+    logPlayer('info','Checkpoint restored',{rom:activeRom(), slot:'manual', reason:'user', savedAt:record.time || null});
     progressChanged=true;
-    if(checkpoint())status('Manual state restored.');
-  }catch(error){status(error.message);}
+    if(checkpoint('manual restore'))status('Manual state restored.');
+  }catch(error){
+    logPlayer('error','Manual restore failed',{rom:activeRom(), error:errorText(error)});
+    status(error.message);
+  }
 };
 window.addEventListener('keydown',e=>{
   if(!cartridge||paused||!keys[e.code]||e.ctrlKey||e.metaKey||e.altKey||e.target.matches('input,summary'))return;
@@ -283,14 +389,14 @@ document.querySelectorAll('[data-key]').forEach(button=>{
   };
   button.onlostpointercapture=button.onpointercancel=button.onpointerup=e=>{pressed.delete(e.pointerId);syncKeys();};
 });
-window.addEventListener('blur',clearInput);
-function pauseForBackground(){
+window.addEventListener('blur',()=>clearInput('blur'));
+function pauseForBackground(reason){
   if(!cartridge)return;
-  pause(true);
-  if(checkpoint())status('Paused. Tap Resume to continue.');
+  pause(true,reason);
+  if(checkpoint(reason))status('Paused. Tap Resume to continue.');
 }
-document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseForBackground();});
-window.addEventListener('pagehide',pauseForBackground);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseForBackground('visibilitychange');});
+window.addEventListener('pagehide',()=>pauseForBackground('pagehide'));
 
 async function readCartridge(file){
   if(!/\.zip$/i.test(file.name))return file;

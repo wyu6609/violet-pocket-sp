@@ -7,3 +7,7 @@ The core is [mGBA](https://github.com/mgba-emu/mgba) via [wasm-gaming/mGBA-wasm]
 
 Each ROM has one manual save-state slot, keyed by SHA-256. Saving replaces the previous slot. Reload the same ROM and choose Load State. Storage limits or private browsing may prevent persistence. 2× advances twice as many frames and accelerates audio. Backgrounding the page pauses playback.
 The first import keeps the last cartridge in IndexedDB. On your next visit to the same origin, click Start to reopen it and restore its last manual save. Import your own FireRed .gba once to use this flow. Clearing site data removes both the stored cartridge and its state.
+
+## Console diagnostics
+
+Filter the browser console for `[Violet Pocket SP]`. Enable **Preserve log** to compare sessions across reloads. **ROM ready** reports the cartridge source, **First frame rendered** confirms the core advanced and drew to the canvas, and **Checkpoint saved** and **Checkpoint restored** identify the slot and reason. Bundled ROM requests report browser-cache delivery when the browser exposes it. Enable **Verbose** to see periodic autosaves and input cleanup. Logs stay in the browser console and contain no ROM or save contents.
