@@ -59,23 +59,72 @@ function cartridgeStore(mode,action){
     };
   });
 }
-async function reopenCartridge(){
-  $('#open').disabled=true;
+const bundledGames = new Map([
+  ['firered', {title:'Pokémon FireRed', path:'firered.zip'}],
+  ['fusion', {title:'Metroid Fusion', path:'Metroid Fusion.zip'}],
+]);
+const library = document.createElement('select');
+library.setAttribute('aria-label','Game library');
+library.style.cssText='display:block;width:100%;padding:10px;margin:8px 0;color:inherit;background:#332c41;border:1px solid #615580;border-radius:8px;font:inherit';
+for(const [id,game] of bundledGames)library.add(new Option(game.title,id));
+$('aside h2').textContent='Game library';
+$('#cart').before(library);
+let selectedGame='firered';
+let userSelected=false;
+library.onchange=()=>{
+  userSelected=true;
+  if(core && $('#gate').hidden && !$('#open').disabled)openGame(library.value);
+};
+function busyLoading(busy){library.disabled=busy;$('#open').disabled=busy;}
+async function openGame(id){
+  busyLoading(true);
   try{
-    const file=await cartridgeStore('readonly',store=>store.get('current')).catch(()=>null);
-    if(file){
-      await boot(file,false);
+    const game=bundledGames.get(id);
+    let file;
+    if(game){
+      status('Loading '+game.title+'…');
+      const response=await fetch('./'+encodeURIComponent(game.path));
+      if(!response.ok)throw Error(game.title+' could not be downloaded.');
+      file=new File([await response.blob()],game.path);
     }else{
-      status('Loading Pokémon FireRed…');
-      const response=await fetch('./firered.zip');
-      if(!response.ok)throw Error('Default cartridge unavailable.');
-      await boot(new File([await response.blob()],'firered.zip'),false);
+      file=await cartridgeStore('readonly',store=>store.get(id));
+      if(!file)throw Error('This cartridge is unavailable. Import it again.');
     }
-  }catch{status('Default cartridge unavailable. Choose Load ROM to play.');}
-  finally{$('#open').disabled=false;}
+    await boot(file,false,id);
+  }catch(error){status(error.message);}
+  finally{library.value=selectedGame;busyLoading(false);}
 }
-async function boot(file,remember){
-  $('#open').disabled=true;
+async function reopenCartridge(){
+  busyLoading(true);
+  let previous;
+  try{
+    const names=await cartridgeStore('readonly',store=>store.get('titles')) || {};
+    for(const [key,name] of Object.entries(names))library.add(new Option(name,key));
+    previous=await cartridgeStore('readonly',store=>store.get('current'));
+  }catch { /* Bundled games also work when storage is unavailable. */ }
+  if(!userSelected && previous instanceof Blob){
+    await boot(previous,true);
+    return;
+  }
+  const id=userSelected?library.value:previous;
+  await openGame(Array.from(library.options).some(o=>o.value===id)?id:'firered');
+}
+async function rememberGame(id,file){
+  if(!file)return cartridgeStore('readwrite',store=>store.put(id,'current'));
+  return cartridgeStore('readwrite',store=>{
+    const request=store.get('titles');
+    request.onsuccess=()=>{
+      const titles=request.result || {};
+      titles[id]=file.name;
+      store.put(titles,'titles');
+      store.put(file,id);
+      store.put(id,'current');
+    };
+    return request;
+  });
+}
+async function boot(file,remember,id){
+  busyLoading(true);
   try{
     file=await readCartridge(file);
     if(!/\.gba$/i.test(file.name)||file.size<192||file.size>32*1024*1024)throw Error('Choose an unpacked .gba file up to 32 MiB.');
@@ -105,16 +154,17 @@ async function boot(file,remember){
           restoreState(manual);
           status('Automatic checkpoint unreadable. Manual save restored.');
         }
-      } else if (!remember) {
+      } else {
         const manual=localStorage.getItem(cartridge);
         if (manual) { restoreState(manual); status('Manual save restored.'); }
       }
     } catch (error) { status('Could not recover progress: '+error.message); }
-    if(remember){
-      try{await cartridgeStore('readwrite',store=>store.put(file,'current'));}
-      catch{status('Playing. Browser storage could not keep the cartridge.');}
-    }
-  }catch(e){status(e.message);}finally{$('#open').disabled=false;}
+    selectedGame=id || cartridge;
+    if(!Array.from(library.options).some(o=>o.value===selectedGame))library.add(new Option(file.name,selectedGame));
+    library.value=selectedGame;
+    try{await rememberGame(selectedGame,remember?file:null);}
+    catch{status('Playing. Browser storage could not remember this game.');}
+  }catch(e){status(e.message);}finally{busyLoading(false);}
 };
 function queueAudio(){
   const n=core._mgbawasm_read_audio(audioPtr,16384);
