@@ -182,7 +182,7 @@ async function boot(file,{source,reason,id,remember=false}){
     const buffer=await file.arrayBuffer();
     const digest=await crypto.subtle.digest('SHA-256',buffer);
     stage='save before ROM switch';
-    if (cartridge && !checkpoint('switch',true)) throw Error('Could not save current progress. Free browser storage before switching games.');
+    if (cartridge && !await checkpoint('switch',true)) throw Error('Could not save current progress. Free browser storage before switching games.');
     stage='load ROM into core';
     pause(true,'switch');cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
     const loaded=memory(buffer.byteLength,ptr=>{
@@ -196,15 +196,16 @@ async function boot(file,{source,reason,id,remember=false}){
     lastAutosaveError=undefined;
     awaitingFirstFrame=true;
     checkpointDue=performance.now()+checkpointInterval;
-    $('fieldset').disabled=false;
-    pause(document.hidden,'boot');
+    $('#last-save').textContent='No checkpoint yet';
     status(document.hidden?'Paused':'Playing');
     try {
-      resumeLatestState();
+      await resumeLatestState();
     } catch (error) {
       logPlayer('error','Save recovery failed',{rom:activeRom(), error:errorText(error)});
       status('Could not recover progress: '+error.message);
     }
+    pause(document.hidden,'boot');
+    $('fieldset').disabled=false;
     logPlayer('info','ROM ready',{rom:activeRom(), source, paused, bytes:buffer.byteLength,
       bootMs:Math.round(performance.now()-startedAt)});
     selectedGame=id || cartridge;
@@ -268,100 +269,98 @@ $('#pause').onclick=async()=>{try{if(paused)await audio.resume();pause(!paused,'
 }};
 $('#fast').onclick=()=>{speed=speed===1?2:1;logPlayer('info','Playback speed changed',{speed});flushSound();$('#fast').setAttribute('aria-pressed',String(speed===2));};
 $('#vol').oninput=e=>gain.gain.setTargetAtTime(e.target.value/100,audio.currentTime,.012);
-function saveState(key){
+function captureState(){
   const size=core._mgbawasm_state_size();
   if(!size)throw Error('No active cartridge.');
-  memory(size,ptr=>{
+  return memory(size,ptr=>{
     if(!core._mgbawasm_state_save(ptr))throw Error('Core could not save.');
-    const bytes=core.HEAPU8.subarray(ptr,ptr+size),parts=[];
-    for(let i=0;i<size;i+=8192)parts.push(String.fromCharCode(...bytes.subarray(i,i+8192)));
-    localStorage.setItem(key,Date.now()+'|'+btoa(parts.join('')));
+    return core.HEAPU8.slice(ptr,ptr+size);
   });
-  return size;
 }
-// Legacy saves contain only base64, so their original save time is unknown.
-function readState(key){
-  const value=localStorage.getItem(key);
-  if(!value)return null;
-  const separator=value.indexOf('|');
-  return separator<0 ? {time:0,data:value} :
-    {time:Number(value.slice(0,separator)) || 0,data:value.slice(separator+1)};
+function markSaved(key,time) {
+  if(key!==cartridge)return;
+  $('#last-save').textContent=time?'Last saved '+new Date(time).toLocaleString():'Recovered an undated save';
 }
-function resumeLatestState(){
+async function resumeLatestState(){
+  const size=core._mgbawasm_state_size();
+  await Saves.open();
+  for(const key of [cartridge,cartridge+':auto']){
+    try{await Saves.migrate(key,size);}
+    catch(error){logPlayer('warn','Legacy save retained',{error:errorText(error)});}
+  }
   const slots=[
-    {slot:'auto',name:'Automatic checkpoint',state:readState(cartridge+':auto')},
-    {slot:'manual',name:'Manual save',state:readState(cartridge)}
+    {slot:'auto',name:'Automatic checkpoint',state:await Saves.get(cartridge+':auto')},
+    {slot:'manual',name:'Manual save',state:await Saves.get(cartridge)}
   ].filter(slot=>slot.state).sort((a,b)=>b.state.time-a.state.time);
   if(!slots.length)logPlayer('info','No checkpoint found',{rom:activeRom()});
   let failure;
   for(const slot of slots){
     try{
-      restoreState(slot.state.data);
-      logPlayer('info','Checkpoint restored',{rom:activeRom(), slot:slot.slot, reason:'boot',
-        savedAt:slot.state.time || null, usedFallback:Boolean(failure)});
+      restoreState(slot.state);
+      markSaved(cartridge,slot.state.time);
+      logPlayer('info','Checkpoint restored',{rom:activeRom(),slot:slot.slot,reason:'boot',savedAt:slot.state.time,usedFallback:Boolean(failure)});
       status(slot.name+' restored.'+(failure?' Newer save was unreadable.':''));
       return;
-    }catch(error){
-      logPlayer('warn','Unreadable checkpoint',{rom:activeRom(), slot:slot.slot, error:errorText(error)});
-      failure=error;
-    }
+    }catch(error){failure=error;logPlayer('warn','Unreadable checkpoint',{slot:slot.slot,error:errorText(error)});}
   }
   if(failure)throw failure;
 }
-function restoreState(saved){
-  if(!saved)throw Error('No state saved for this ROM.');
-  const raw=atob(saved),size=core._mgbawasm_state_size();
-  if(!size||raw.length!==size)throw Error('Incompatible state.');
+function restoreState(record){
+  if(!record)throw Error('No state saved for this ROM.');
+  const size=core._mgbawasm_state_size();
+  if(!Saves.valid(record,size))throw Error('Damaged or incompatible checkpoint.');
   memory(size,ptr=>{
-    core.HEAPU8.set(Uint8Array.from(raw,c=>c.charCodeAt(0)),ptr);
+    core.HEAPU8.set(record.bytes,ptr);
     if(!core._mgbawasm_state_load(ptr))throw Error('Core rejected this state.');
   });
   flushSound();clearInput('restore');last=0;debt=0;paint();
 }
-function checkpoint(reason='periodic',force=false){
-  if(!cartridge||(!force&&!progressChanged)){
-    if(cartridge && reason!=='periodic')logPlayer('debug','Checkpoint skipped',{rom:activeRom(), reason, unchanged:true});
-    return true;
-  }
+async function checkpoint(reason='periodic',force=false){
+  if(!cartridge||(!force&&!progressChanged))return true;
+  const key=cartridge,rom=activeRom();
   try{
-    const bytes=saveState(cartridge+':auto');
+    const record=Saves.record(captureState());
+    progressChanged=false;
+    await Saves.put(key+':auto',record);
+    if(cartridge!==key)return true;
     const recovered=lastAutosaveError!==undefined;
     lastAutosaveError=undefined;
-    logPlayer(reason==='periodic' && !recovered ? 'debug' : 'info','Checkpoint saved',{
-      rom:activeRom(), slot:'auto', reason, bytes, recovered
+    markSaved(key,record.time);
+    logPlayer(reason==='periodic'&&!recovered?'debug':'info','Checkpoint saved',{
+      rom,slot:'auto',reason,bytes:record.bytes.length,savedAt:record.time,recovered
     });
-    progressChanged=false;
     return true;
   }catch(error){
-    const message=errorText(error);
-    if(reason!=='periodic' || lastAutosaveError!==message)
-      logPlayer('error','Checkpoint failed',{rom:activeRom(), slot:'auto', reason, error:message});
-    lastAutosaveError=message;
-    status('Automatic save failed: '+error.message);
+    if(cartridge===key){
+      progressChanged=true;
+      const message=errorText(error);
+      if(reason!=='periodic'||lastAutosaveError!==message)logPlayer('error','Checkpoint failed',{rom,slot:'auto',reason,error:message});
+      lastAutosaveError=message;status('Automatic save failed: '+error.message);
+    }
     return false;
   }
 }
-$('#save').onclick=()=>{
+$('#save').onclick=async()=>{
+  const key=cartridge;
   try{
-    const bytes=saveState(cartridge);
-    logPlayer('info','Checkpoint saved',{rom:activeRom(), slot:'manual', reason:'user', bytes});
+    const rec=Saves.record(captureState());
+    await Saves.put(key,rec);
+    if(cartridge!==key)return;
+    markSaved(key,rec.time);
+    logPlayer('info','Checkpoint saved',{rom:activeRom(),slot:'manual',reason:'user',bytes:rec.bytes.length,savedAt:rec.time});
     status('Manual state saved.');
-  }catch(error){
-    logPlayer('error','Checkpoint failed',{rom:activeRom(), slot:'manual', reason:'user', error:errorText(error)});
-    status(error.message);
-  }
+  }catch(error){logPlayer('error','Checkpoint failed',{slot:'manual',error:errorText(error)});status(error.message);}
 };
-$('#load').onclick=()=>{
+$('#load').onclick=async()=>{
+  const key=cartridge;
   try{
-    const record=readState(cartridge);
-    restoreState(record?.data);
-    logPlayer('info','Checkpoint restored',{rom:activeRom(), slot:'manual', reason:'user', savedAt:record.time || null});
+    const rec=await Saves.get(key);
+    if(cartridge!==key)return;
+    restoreState(rec);
+    logPlayer('info','Checkpoint restored',{rom:activeRom(),slot:'manual',reason:'user',savedAt:rec.time});
     progressChanged=true;
-    if(checkpoint('manual restore'))status('Manual state restored.');
-  }catch(error){
-    logPlayer('error','Manual restore failed',{rom:activeRom(), error:errorText(error)});
-    status(error.message);
-  }
+    if(await checkpoint('manual restore'))status('Manual state restored.');
+  }catch(error){logPlayer('error','Manual restore failed',{error:errorText(error)});status(error.message);}
 };
 window.addEventListener('keydown',e=>{
   if(!cartridge||paused||!keys[e.code]||e.ctrlKey||e.metaKey||e.altKey||e.target.matches('input,summary'))return;
@@ -390,10 +389,10 @@ document.querySelectorAll('[data-key]').forEach(button=>{
   button.onlostpointercapture=button.onpointercancel=button.onpointerup=e=>{pressed.delete(e.pointerId);syncKeys();};
 });
 window.addEventListener('blur',()=>clearInput('blur'));
-function pauseForBackground(reason){
+async function pauseForBackground(reason){
   if(!cartridge)return;
   pause(true,reason);
-  if(checkpoint(reason))status('Paused. Tap Resume to continue.');
+  if(await checkpoint(reason))status('Paused. Tap Resume to continue.');
 }
 document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseForBackground('visibilitychange');});
 window.addEventListener('pagehide',()=>pauseForBackground('pagehide'));
