@@ -7,6 +7,8 @@ const names = ['A','B','Select','Start','Right','Left','Up','Down','R','L'];
 const keys = {KeyZ:'A',KeyX:'B',Enter:'Start',ShiftLeft:'Select',ShiftRight:'Select',KeyA:'L',KeyS:'R',ArrowLeft:'Left',ArrowUp:'Up',ArrowRight:'Right',ArrowDown:'Down'};
 const pressed = new Map(), sources = new Set();
 let core, audio, gain, audioPtr, cartridge, paused=true, speed=1, nextSound=0, last=0, debt=0;
+const checkpointInterval = 10000;
+let checkpointDue = 0, progressChanged = false;
 const status = message => { $('#status').textContent=message; };
 function syncKeys(){
   const held = new Set(pressed.values());
@@ -79,6 +81,7 @@ async function boot(file,remember){
     if(!/\.gba$/i.test(file.name)||file.size<192||file.size>32*1024*1024)throw Error('Choose an unpacked .gba file up to 32 MiB.');
     const buffer=await file.arrayBuffer();
     const digest=await crypto.subtle.digest('SHA-256',buffer);
+    if (cartridge && !checkpoint()) throw Error('Could not save current progress. Free browser storage before switching games.');
     pause(true);cartridge=null;$('fieldset').disabled=true;$('#cart').textContent='No ROM loaded';
     const loaded=memory(buffer.byteLength,ptr=>{
       core.HEAPU8.set(new Uint8Array(buffer),ptr);
@@ -86,11 +89,31 @@ async function boot(file,remember){
     });
     if(!loaded)throw Error('mGBA could not open this cartridge.');
     cartridge='violet-mgba-031:'+Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
-    $('#cart').textContent=file.name;$('fieldset').disabled=false;pause(false);status('Playing');
+    $('#cart').textContent=file.name;
+    progressChanged=false;
+    checkpointDue=performance.now()+checkpointInterval;
+    $('fieldset').disabled=false;
+    pause(document.hidden);
+    status(document.hidden?'Paused':'Playing');
+    try {
+      const automatic=localStorage.getItem(cartridge+':auto');
+      if (automatic) {
+        try { restoreState(automatic); status('Automatic checkpoint restored.'); }
+        catch (error) {
+          const manual=localStorage.getItem(cartridge);
+          if (!manual) throw error;
+          restoreState(manual);
+          status('Automatic checkpoint unreadable. Manual save restored.');
+        }
+      } else if (!remember) {
+        const manual=localStorage.getItem(cartridge);
+        if (manual) { restoreState(manual); status('Manual save restored.'); }
+      }
+    } catch (error) { status('Could not recover progress: '+error.message); }
     if(remember){
       try{await cartridgeStore('readwrite',store=>store.put(file,'current'));}
       catch{status('Playing. Browser storage could not keep the cartridge.');}
-    }else if(localStorage.getItem(cartridge)){state(false);}
+    }
   }catch(e){status(e.message);}finally{$('#open').disabled=false;}
 };
 function queueAudio(){
@@ -117,7 +140,14 @@ function tick(time){
       const step=1000/59.7275;
       let advanced=false;
       while(debt>=step){core._mgbawasm_run_frame();queueAudio();debt-=step;advanced=true;}
-      if(advanced)paint();
+      if(advanced){
+        paint();
+        progressChanged=true;
+        if(time>=checkpointDue){
+          checkpointDue=time+checkpointInterval;
+          checkpoint();
+        }
+      }
     }catch(e){pause(true);status(e.message);}
   }
   requestAnimationFrame(tick);
@@ -125,27 +155,47 @@ function tick(time){
 $('#pause').onclick=async()=>{try{if(paused)await audio.resume();pause(!paused);status(paused?'Paused':'Playing');}catch(e){status(e.message);}};
 $('#fast').onclick=()=>{speed=speed===1?2:1;flushSound();$('#fast').setAttribute('aria-pressed',String(speed===2));};
 $('#vol').oninput=e=>gain.gain.setTargetAtTime(e.target.value/100,audio.currentTime,.012);
-function state(save){
-  try{
-    const size=core._mgbawasm_state_size();if(!size)throw Error('No active cartridge.');
-    memory(size,ptr=>{
-      if(save){
-        if(!core._mgbawasm_state_save(ptr))throw Error('Core could not save.');
-        const bytes=core.HEAPU8.subarray(ptr,ptr+size),parts=[];
-        for(let i=0;i<size;i+=8192)parts.push(String.fromCharCode(...bytes.subarray(i,i+8192)));
-        localStorage.setItem(cartridge,btoa(parts.join('')));
-      }else{
-        const saved=localStorage.getItem(cartridge);if(!saved)throw Error('No state saved for this ROM.');
-        const raw=atob(saved);if(raw.length!==size)throw Error('Incompatible state.');
-        core.HEAPU8.set(Uint8Array.from(raw,c=>c.charCodeAt(0)),ptr);
-        if(!core._mgbawasm_state_load(ptr))throw Error('Core rejected this state.');
-        flushSound();clearInput();last=0;debt=0;paint();
-      }
-    });
-    status(save?'State saved on this device.':'State restored.');
-  }catch(e){status(e.message);}
+function saveState(key){
+  const size=core._mgbawasm_state_size();
+  if(!size)throw Error('No active cartridge.');
+  memory(size,ptr=>{
+    if(!core._mgbawasm_state_save(ptr))throw Error('Core could not save.');
+    const bytes=core.HEAPU8.subarray(ptr,ptr+size),parts=[];
+    for(let i=0;i<size;i+=8192)parts.push(String.fromCharCode(...bytes.subarray(i,i+8192)));
+    localStorage.setItem(key,btoa(parts.join('')));
+  });
 }
-$('#save').onclick=()=>state(true);$('#load').onclick=()=>state(false);
+function restoreState(saved){
+  if(!saved)throw Error('No state saved for this ROM.');
+  const raw=atob(saved),size=core._mgbawasm_state_size();
+  if(!size||raw.length!==size)throw Error('Incompatible state.');
+  memory(size,ptr=>{
+    core.HEAPU8.set(Uint8Array.from(raw,c=>c.charCodeAt(0)),ptr);
+    if(!core._mgbawasm_state_load(ptr))throw Error('Core rejected this state.');
+  });
+  flushSound();clearInput();last=0;debt=0;paint();
+}
+function checkpoint(){
+  if(!cartridge||!progressChanged)return true;
+  try{
+    saveState(cartridge+':auto');
+    progressChanged=false;
+    return true;
+  }catch(error){
+    status('Automatic save failed: '+error.message);
+    return false;
+  }
+}
+$('#save').onclick=()=>{
+  try{saveState(cartridge);status('Manual state saved.');}catch(error){status(error.message);}
+};
+$('#load').onclick=()=>{
+  try{
+    restoreState(localStorage.getItem(cartridge));
+    progressChanged=true;
+    if(checkpoint())status('Manual state restored.');
+  }catch(error){status(error.message);}
+};
 window.addEventListener('keydown',e=>{
   if(!cartridge||paused||!keys[e.code]||e.ctrlKey||e.metaKey||e.altKey||e.target.matches('input,summary'))return;
   e.preventDefault();pressed.set(e.code,keys[e.code]);syncKeys();
@@ -164,7 +214,13 @@ document.querySelectorAll('[data-key]').forEach(button=>{
   button.onlostpointercapture=button.onpointercancel=button.onpointerup=e=>{pressed.delete(e.pointerId);syncKeys();};
 });
 window.addEventListener('blur',clearInput);
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&cartridge){pause(true);status('Paused');}});
+function pauseForBackground(){
+  if(!cartridge)return;
+  pause(true);
+  if(checkpoint())status('Paused. Tap Resume to continue.');
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseForBackground();});
+window.addEventListener('pagehide',pauseForBackground);
 
 async function readCartridge(file){
   if(!/\.zip$/i.test(file.name))return file;
