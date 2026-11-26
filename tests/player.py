@@ -1,4 +1,5 @@
 import functools
+import tempfile
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -47,6 +48,47 @@ def check_saves(page, url):
     second.close()
     print('PASS binary IndexedDB, exact legacy bytes and timestamp, invalid legacy retained, background save.',flush=True)
 
+def download(page,button,directory):
+    with page.expect_download(timeout=20000) as event:
+        page.click(button)
+    download=event.value
+    path=Path(directory)/download.suggested_filename
+    download.save_as(str(path))
+    return path.read_bytes()
+
+def import_file(page,name,content,accept=True):
+    page.once('dialog', lambda d:d.accept() if accept else d.dismiss())
+    page.locator('#save-file').set_input_files({'name':name,'mimeType':'application/octet-stream','buffer':content})
+
+def check_transfers(page):
+    page.evaluate("pause(true,'test')")
+    page.locator('summary',has_text='Transfer saves').click()
+    regs="()=>Array.from(captureState().slice(32,96))"
+    original=page.evaluate(regs)
+    with tempfile.TemporaryDirectory() as tmp:
+        state=download(page,'#export-state',tmp)
+        page.evaluate("pause(false,'test')")
+        page.wait_for_function("before=>JSON.stringify(Array.from(captureState().slice(32,96)))!==JSON.stringify(before)",arg=original)
+        page.evaluate("pause(true,'test')")
+        import_file(page,'game.vpspsave',state)
+        expect(page.locator('#status')).to_have_text('Checkpoint imported.')
+        assert page.evaluate(regs)==original, 'CPU registers did not rewind'
+        assert page.evaluate('paused')
+        corrupt=bytearray(state)
+        corrupt[-1]^=1
+        page.locator('#save-file').set_input_files({'name':'bad.vpspsave','mimeType':'application/octet-stream','buffer':bytes(corrupt)})
+        expect(page.locator('#status')).to_contain_text('checksum')
+        assert page.evaluate(regs)==original
+        # Raw GBA saves have no wrapper. Verify all bytes through the real mGBA core.
+        native_size=page.evaluate('readBattery()?.length||131072')
+        raw=bytes((i*7+3)%256 for i in range(native_size))
+        import_file(page,'FireRed.sav',raw)
+        expect(page.locator('#status')).to_contain_text('Game save imported')
+        assert download(page,'#export-battery',tmp)==raw
+        imported=page.evaluate("async()=>{const r=await Saves.get(cartridge+':auto');return r.battery?.length}")
+        assert imported==len(raw)
+    print('PASS checkpoint file rewound real CPU registers, corrupt import preserved progress, and raw .sav round-tripped byte for byte.',flush=True)
+
 def check_offline(page,url,engine,host):
     expect(page.locator('#offline-status')).to_have_text('Ready offline',timeout=90000)
     page.click('#save')
@@ -81,6 +123,7 @@ def main():
         try:
             boot(page,url)
             check_saves(page,url)
+            check_transfers(page)
             check_offline(page,url,engine,host)
         finally:
             print('Player status:',page.locator('#status').all_text_contents(),flush=True)

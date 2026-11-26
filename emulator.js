@@ -281,6 +281,22 @@ function captureState(){
     return core.HEAPU8.slice(ptr,ptr+size);
   });
 }
+function readBattery(){
+  const length=core._mgbawasm_sram_save(),ptr=core._mgbawasm_sram_ptr();
+  return length && ptr ? core.HEAPU8.slice(ptr,ptr+length) : null;
+}
+function loadBattery(bytes){
+  memory(bytes.length,ptr=>{
+    core.HEAPU8.set(bytes,ptr);
+    if(!core._mgbawasm_sram_load(ptr,bytes.length))throw Error('Core rejected this game save.');
+  });
+}
+function captureRecord(){
+  const record=Saves.record(captureState());
+  record.battery=readBattery();
+  if(record.battery)record.batteryCRC=Saves.checksum(record.battery);
+  return record;
+}
 function markSaved(key,time) {
   if(key!==cartridge)return;
   $('#last-save').textContent=time?'Last saved '+new Date(time).toLocaleString():'Recovered an undated save';
@@ -317,13 +333,14 @@ function restoreState(record){
     core.HEAPU8.set(record.bytes,ptr);
     if(!core._mgbawasm_state_load(ptr))throw Error('Core rejected this state.');
   });
+  if(record.battery)loadBattery(record.battery);
   flushSound();clearInput('restore');last=0;debt=0;paint();
 }
 async function checkpoint(reason='periodic',force=false){
   if(!cartridge||(!force&&!progressChanged))return true;
   const key=cartridge,rom=activeRom();
   try{
-    const record=Saves.record(captureState());
+    const record=captureRecord();
     progressChanged=false;
     await Saves.put(key+':auto',record);
     if(cartridge!==key)return true;
@@ -347,7 +364,7 @@ async function checkpoint(reason='periodic',force=false){
 $('#save').onclick=async()=>{
   const key=cartridge;
   try{
-    const rec=Saves.record(captureState());
+    const rec=captureRecord();
     await Saves.put(key,rec);
     if(cartridge!==key)return;
     markSaved(key,rec.time);

@@ -38,7 +38,8 @@ const Saves = (() => {
     return {bytes,time,crc:checksum(bytes)};
   }
   function valid(rec,size) {
-    return rec?.bytes instanceof Uint8Array && rec.bytes.length===size && rec.crc===checksum(rec.bytes);
+    return rec?.bytes instanceof Uint8Array && rec.bytes.length===size && rec.crc===checksum(rec.bytes) &&
+      (!rec.battery || (rec.battery instanceof Uint8Array && rec.batteryCRC===checksum(rec.battery)));
   }
   async function migrate(key,size) {
     const legacy=localStorage.getItem(key);
