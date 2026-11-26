@@ -20,3 +20,8 @@
 #history-list {display:grid;gap:.4rem;margin-top:.5rem}
 #history-list button {display:flex;align-items:center;gap:.65rem;text-align:left;overflow-wrap:anywhere}
 #history-list img {width:72px;height:48px;object-fit:contain;image-rendering:pixelated}
+aside details {margin:.7rem 0} aside summary {cursor:pointer}
+#diag-summary {display:grid;grid-template-columns:auto minmax(0,1fr);gap:.4rem .8rem;font-size:.9rem}
+#diag-summary dd {margin:0;overflow-wrap:anywhere}
+#report-text {width:100%;min-height:8rem;margin-top:.5rem;font:inherit}
+#copy-result {display:block;margin-top:.35rem}

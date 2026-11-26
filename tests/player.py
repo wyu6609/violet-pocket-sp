@@ -129,6 +129,38 @@ def check_history(page,url):
     expect(page.locator('#status')).to_contain_text('unreadable')
     print('PASS bounded five-minute history, three real thumbnails, exact CPU rewind, and recovery from two damaged slots.',flush=True)
 
+def check_diagnostics(page,engine):
+    page.click('#diagnostics summary')
+    summary=page.locator('#diag-summary')
+    expect(summary).to_contain_text('Session length')
+    expect(summary).to_contain_text('Ready offline')
+    page.wait_for_function('Diagnostics.sample().fps>0',timeout=15000)
+    page.evaluate("""async()=>{
+      const transaction=IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction=function(name,mode,...rest){
+        if(name==='states'&&mode==='readwrite')throw new DOMException('Test storage full','QuotaExceededError');
+        return transaction.call(this,name,mode,...rest);
+      };
+      try{if(await checkpoint('storage test',true))throw Error('write unexpectedly passed');}
+      finally{IDBDatabase.prototype.transaction=transaction;}
+      if(!await checkpoint('retry',true))throw Error('retry failed');
+    }""")
+    expect(summary).to_contain_text('QuotaExceededError')
+    assert page.evaluate('Diagnostics.sample().failures')>=1
+    if engine=='chromium':
+        page.context.grant_permissions(['clipboard-read','clipboard-write'])
+        page.click('#copy-report')
+        assert 'Frames advanced' in page.evaluate('navigator.clipboard.readText()')
+    page.evaluate("Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>Promise.reject()}})")
+    page.click('#copy-report')
+    field=page.locator('#report-text')
+    expect(field).to_be_visible()
+    assert 'Checkpoint failed' in field.input_value()
+    assert field.evaluate('e=>e.selectionEnd-e.selectionStart')==len(field.input_value())
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.click('#diagnostics summary')
+    print('PASS live diagnostics, frame rate, IndexedDB failure and recovery, readable report, and clipboard fallback.',flush=True)
+
 def check_offline(page,url,engine,host):
     expect(page.locator('#offline-status')).to_have_text('Ready offline',timeout=90000)
     # Warm a second bundled game, then import that same user's local cartridge.
@@ -181,6 +213,7 @@ def main():
             check_saves(page,url)
             check_transfers(page)
             check_history(page,url)
+            check_diagnostics(page,engine)
             check_offline(page,url,engine,host)
         finally:
             print('Player status:',page.locator('#status').all_text_contents(),flush=True)

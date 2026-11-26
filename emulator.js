@@ -12,6 +12,7 @@ let checkpointDue = 0, progressChanged = false;
 let lastAutosaveError, awaitingFirstFrame=false;
 function logPlayer(level, event, details = {}) {
   console[level]('[Violet Pocket SP] ' + event, details);
+  Diagnostics.event(level,event,details);
 }
 function errorText(error) {
   return [error?.name, error?.message || (typeof error === 'string' ? error : '')]
@@ -32,6 +33,7 @@ function clearInput(reason){
 function flushSound(){for(const s of sources)s.stop();sources.clear();nextSound=0;}
 function pause(value,reason){
   const changed = paused !== value;
+  Diagnostics.resetRate();
   paused=value;last=0;debt=0;clearInput(reason);flushSound();
   if(changed)logPlayer('info',value ? 'Emulator paused' : 'Emulator resumed',{reason, rom:activeRom()});
   $('#pause').textContent=value?'Resume':'Pause';
@@ -127,8 +129,9 @@ async function openGame(id,reason='selection'){
       logPlayer('info','Bundled ROM ready',{game:game.title, delivery, bytes:file.size,
         fetchMs:Math.round(performance.now()-startedAt)});
     }else{
-      file=await cartridgeStore('readonly',store=>store.get(id));
-      if(!file)throw Error('This cartridge is unavailable. Import it again.');
+      const stored=await cartridgeStore('readonly',store=>store.get(id));
+      if(!stored)throw Error('This cartridge is unavailable. Import it again.');
+      file=stored instanceof Blob ? (stored.name?stored:new File([stored],library.selectedOptions[0]?.text||'game.gba')) : new File([stored.bytes],stored.name);
     }
     await boot(file,{source, id, reason});
   }catch(error){
@@ -155,7 +158,7 @@ async function reopenCartridge(){
   const id=userSelected?library.value:previous;
   await openGame(Array.from(library.options).some(o=>o.value===id)?id:'firered','power on');
 }
-async function rememberGame(id,file){
+async function rememberGame(id,file,bytes){
   if(!file)return cartridgeStore('readwrite',store=>store.put(id,'current'));
   return cartridgeStore('readwrite',store=>{
     const request=store.get('titles');
@@ -163,7 +166,7 @@ async function rememberGame(id,file){
       const titles=request.result || {};
       titles[id]=file.name;
       store.put(titles,'titles');
-      store.put(file,id);
+      store.put({name:file.name,bytes},id);
       store.put(id,'current');
     };
     return request;
@@ -213,7 +216,7 @@ async function boot(file,{source,reason,id,remember=false}){
     if(!Array.from(library.options).some(o=>o.value===selectedGame))library.add(new Option(file.name,selectedGame));
     library.value=selectedGame;
     try{
-      await rememberGame(selectedGame,remember?file:null);
+      await rememberGame(selectedGame,remember?file:null,buffer);
       void Offline.check(selectedGame,bundledGames.get(selectedGame)?.path);
     }
     catch(error){
@@ -248,9 +251,10 @@ function tick(time){
     try{
       debt+=Math.min(80,last?time-last:17)*speed;last=time;
       const step=1000/59.7275;
-      let advanced=false;
-      while(debt>=step){core._mgbawasm_run_frame();queueAudio();debt-=step;advanced=true;}
+      let advanced=0;
+      while(debt>=step){core._mgbawasm_run_frame();queueAudio();debt-=step;advanced++;}
       if(advanced){
+        Diagnostics.frames(advanced,time);
         paint();
         if(awaitingFirstFrame){
           awaitingFirstFrame=false;

@@ -16,3 +16,14 @@ jobs:
       - if: matrix.engine == 'webkit'
         run: python -m playwright install --with-deps webkit > /tmp/webkit-install.log
       - run: python tests/player.py ${{ matrix.engine }}
+      - if: matrix.engine == 'chromium'
+        run: SOAK_SECONDS=35 python tests/soak.py
+  endurance:
+    if: github.event_name == 'workflow_dispatch' || (github.ref_name == 'sp-player-upgrades' && contains(github.event.head_commit.message, '[soak]'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 145
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install -q playwright==1.55.0
+      - name: Play FireRed for two hours and verify the last save offline
+        run: python tests/soak.py
