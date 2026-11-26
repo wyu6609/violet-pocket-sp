@@ -1,6 +1,8 @@
 import functools
 import tempfile
 import zipfile
+import time
+import urllib.request
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -198,6 +200,17 @@ def main():
     host=ThreadingHTTPServer(('127.0.0.1',0),handler)
     threading.Thread(target=host.serve_forever,daemon=True).start()
     url='http://127.0.0.1:%d/' % host.server_port
+    if '--live' in sys.argv:
+        if engine!='chromium':raise ValueError('Use Chromium offline emulation for the public origin.')
+        url='https://wyu6609.github.io/violet-pocket-sp/'
+        expected=(ROOT/'sw.js').read_bytes()
+        for attempt in range(60):
+            try:
+                served=urllib.request.urlopen(url+'sw.js?verify='+str(time.time_ns()),timeout=10).read()
+                if served==expected: break
+            except OSError: pass
+            time.sleep(5)
+        else:raise AssertionError('Public service worker does not match this build.')
     with sync_playwright() as p:
         if engine=='webkit':
             browser=p.webkit.launch()
