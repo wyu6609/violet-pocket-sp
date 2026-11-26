@@ -1,5 +1,6 @@
 import functools
 import tempfile
+import zipfile
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -130,6 +131,17 @@ def check_history(page,url):
 
 def check_offline(page,url,engine,host):
     expect(page.locator('#offline-status')).to_have_text('Ready offline',timeout=90000)
+    # Warm a second bundled game, then import that same user's local cartridge.
+    page.locator('select[aria-label="Game library"]').select_option('fusion')
+    expect(page.locator('#cart')).to_contain_text('fusion',ignore_case=True,timeout=60000)
+    expect(page.locator('#offline-status')).to_have_text('Ready offline')
+    assert not page.evaluate('async()=>(await History.list(cartridge)).length')
+    with zipfile.ZipFile(ROOT/'Metroid Fusion.zip') as z:
+        name=next(n for n in z.namelist() if n.lower().endswith('.gba'))
+        data=z.read(name)
+    page.locator('#file').set_input_files({'name':'local-fusion.gba','mimeType':'application/octet-stream','buffer':data})
+    expect(page.locator('#cart')).to_have_text('local-fusion.gba')
+    expect(page.locator('#offline-status')).to_have_text('Ready offline')
     page.click('#save')
     expect(page.locator('#status')).to_have_text('Manual state saved.')
     page.goto('about:blank')
@@ -141,7 +153,12 @@ def check_offline(page,url,engine,host):
     boot(page,url+'?offline-relaunch')
     expect(page.locator('#offline-status')).to_have_text('Ready offline')
     expect(page.locator('#status')).to_contain_text('restored')
-    print('PASS fresh offline navigation, local core, cartridge and recovered checkpoint.',flush=True)
+    expect(page.locator('#cart')).to_have_text('local-fusion.gba')
+    page.locator('select[aria-label="Game library"]').select_option('firered')
+    expect(page.locator('#cart')).to_contain_text('fire',ignore_case=True,timeout=30000)
+    expect(page.locator('#offline-status')).to_have_text('Ready offline')
+    expect(page.locator('#status')).to_contain_text('restored')
+    print('PASS fresh offline launch of local import, saved progress, independent histories and offline switch to bundled FireRed.',flush=True)
 
 def main():
     engine=sys.argv[1] if len(sys.argv)>1 else 'chromium'
