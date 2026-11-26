@@ -201,15 +201,24 @@ window.addEventListener('keydown',e=>{
   e.preventDefault();pressed.set(e.code,keys[e.code]);syncKeys();
 });
 window.addEventListener('keyup',e=>{if(pressed.delete(e.code))syncKeys();});
+const mobileDevice = navigator.userAgentData?.mobile || /Android|iPhone|iPod|iPad|Mobi/i.test(navigator.userAgent);
+function pulseOnTouch(event){
+  if(mobileDevice && event.pointerType==='touch')navigator.vibrate?.(15);
+}
+// Touch release also supplies user activation on the first skin selection.
+$('.skin-controls button').addEventListener('pointerup',pulseOnTouch);
 document.querySelectorAll('[data-key]').forEach(button=>{
   button.onpointerdown=e=>{
     if(!cartridge||paused)return;e.preventDefault();button.setPointerCapture(e.pointerId);
-    pressed.set(e.pointerId,button.dataset.key);syncKeys();navigator.vibrate?.(8);
+    pressed.set(e.pointerId,button.dataset.key);syncKeys();pulseOnTouch(e);
   };
   button.onpointermove=e=>{
     if(!pressed.has(e.pointerId)||!button.closest('.dpad'))return;
     const target=document.elementFromPoint(e.clientX,e.clientY)?.closest('.dpad button');
-    pressed.set(e.pointerId,target?.dataset.key);syncKeys();
+    const direction=target?.dataset.key;
+    if(direction===pressed.get(e.pointerId))return;
+    pressed.set(e.pointerId,direction);syncKeys();
+    if(direction)pulseOnTouch(e);
   };
   button.onlostpointercapture=button.onpointercancel=button.onpointerup=e=>{pressed.delete(e.pointerId);syncKeys();};
 });
