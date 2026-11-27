@@ -19,3 +19,9 @@ Open each game online once. **Ready offline** confirms the player, mGBA core and
 Serve the repository with `python -m http.server 8000` and open `http://localhost:8000`. Use HTTPS for hosted play. Browser dependencies are served from `vendor/`; rebuild them with `python scripts/vendor_runtime.py`. The core is [mGBA](https://github.com/mgba-emu/mgba), packaged by [wasm-gaming/mGBA-wasm](https://github.com/wasm-gaming/mGBA-wasm) v0.3.1. License notices are in `vendor/`.
 
 The browser tests use Python Playwright 1.55.0, Google Chrome and Playwright WebKit. Run `python tests/player.py chromium` and `python tests/player.py webkit`. Run `python tests/soak.py` for a two-hour foreground FireRed session with regular inputs, frame and autosave checks, and final offline recovery. GitHub Actions runs the short suite on pushes; choose **GBA player checks → Run workflow** to repeat the full endurance test.
+
+## Copyright and game distribution
+
+Violet Pocket SP is an independent Game Boy Advance emulator project built on mGBA. The public repository includes Pokémon FireRed (`firered.zip`) and Metroid Fusion (`Metroid Fusion.zip`). When you select **Load ROM**, the player opens your file locally in your browser.
+
+mGBA is distributed under the Mozilla Public License 2.0. That license covers the emulator code. The games remain subject to their respective copyrights. If you publish a fork with either game included, confirm that you have permission to distribute that title to the public.
